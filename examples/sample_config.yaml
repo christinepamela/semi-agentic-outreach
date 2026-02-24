@@ -1,0 +1,24 @@
+# ============================================================
+# EXAMPLE config.yaml — Copy this to the project root as config.yaml
+# and fill in your real values
+# ============================================================
+
+anthropic_api_key: "sk-ant-api03-YOUR-KEY-HERE"
+
+weekly_budget: 2.00
+
+outreach_data_path: "data/outreach_import.json"
+learnings_path: "data/learnings.json"
+cache_dir: "data/cache"
+output_dir: "outputs"
+
+companies_per_week: 10
+message_variants: 5
+conservative_first_touch: true
+enable_learning: true
+
+user_name: "Christine Pamela"
+user_short_name: "Pam"
+framework_name: "Theta Framework"
+consultant_focus: "Innovation portfolio strategy — Core, Edge, and Beyond"
+user_timezone: "Asia/Singapore"
