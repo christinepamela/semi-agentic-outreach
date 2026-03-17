@@ -1668,47 +1668,6 @@ def find_case_study_url(company_name: str) -> str | None:
     return None
 
 
-def find_related_case_studies(industry: str, archetype: str, exclude: str = "") -> list:
-    """
-    Find Pam's existing case studies that are closest to a new company.
-    Returns list of (company_name, url, reason) tuples, up to 3.
-    """
-    exclude_key = exclude.lower().strip()
-    candidates  = []
-
-    # Industry match
-    industry_matches = []
-    for ind_key, names in INDUSTRY_CASE_STUDY_MAP.items():
-        if any(w.lower() in industry.lower() for w in ind_key.split(" / ")):
-            industry_matches.extend(names)
-
-    for name in industry_matches:
-        if name == exclude_key:
-            continue
-        url = KNOWN_CASE_STUDIES.get(name)
-        if url:
-            candidates.append((name.title(), url, f"same industry ({industry})"))
-
-    # Archetype match — add well-known examples by archetype
-    archetype_examples = {
-        "1. Core Heavy":    ["tyson foods", "kraft heinz"],
-        "2. Edge Active":   ["siemens", "bosch", "ericsson"],
-        "3. Beyond Funded": ["danone", "roche", "shell"],
-        "4. Balanced":      ["nestle", "unilever", "microsoft"],
-        "5. Core + Edge":   ["volkswagen", "intel", "ibm"],
-        "6. Theater Risk":  ["general mills", "hp"],
-    }
-    for arch_key, names in archetype_examples.items():
-        if arch_key in archetype:
-            for name in names:
-                if name == exclude_key:
-                    continue
-                url = KNOWN_CASE_STUDIES.get(name)
-                if url and not any(c[0].lower() == name for c in candidates):
-                    candidates.append((name.title(), url, f"similar Theta archetype ({display_archetype(archetype)})"))
-
-    return candidates[:3]
-
 
 def fetch_case_study_for_company(company_name: str, learnings: dict) -> dict:
     """
