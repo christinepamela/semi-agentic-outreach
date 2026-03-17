@@ -169,10 +169,13 @@ def get_perplexity_key(config: dict) -> str | None:
     Cost: ~$0.01 per people lookup (sonar model).
     """
     key = config.get("perplexity_api_key", "")
-    if not key or "pplx-xx" in key or len(key) < 10:
+    if not key or len(key) < 20:
+        return None
+    # Reject obvious placeholders
+    if key in ("pplx-xx", "pplx-...", "YOUR-KEY-HERE"):
         return None
     if not REQUESTS_AVAILABLE:
-        print("  ⚠️  requests package not found. Run: pip install requests")
+        print("  ⚠️  requests package not found. Run: python -m pip install requests")
         return None
     return key
 
@@ -764,22 +767,888 @@ KNOWN_CASE_STUDIES = {
 }
 
 # Industry → which case studies are best references
-INDUSTRY_CASE_STUDY_MAP = {
-    "Food & Beverage":             ["danone", "nestle", "kraft heinz", "general mills", "pepsico", "tyson foods", "unilever"],
-    "Consumer Goods / FMCG":       ["unilever", "procter & gamble", "kraft heinz", "estee lauder", "lvmh"],
-    "Technology / Software":       ["microsoft", "google", "apple", "ibm", "intel", "hp", "canva"],
-    "Automotive":                  ["volkswagen", "tesla", "proton", "rolls-royce"],
-    "Healthcare & MedTech":        ["roche", "johnson & johnson"],
-    "Industrial / Manufacturing":  ["siemens", "bosch", "rolls-royce", "keysight", "infineon"],
-    "Telecoms & Media":            ["ericsson", "maxis", "celcom", "astro", "huawei"],
-    "Banking & Financial Services":["dbs", "maybank"],
-    "Energy & Utilities":          ["shell", "rwe", "petronas"],
-    "Luxury & Fashion":            ["lvmh", "estee lauder"],
-    "Retail":                      ["grab", "lego"],
-    "Pharmaceuticals & Life Sciences": ["roche", "johnson & johnson"],
-    "Semiconductor & Electronics": ["intel", "infineon", "keysight", "huawei"],
-    "Professional Services / Consulting": ["ibm", "dbs"],
+# Sub-sector aware industry -> case study mapping (specific before generic)
+INDUSTRY_CASE_STUDY_MAP_RANKED = [
+    ("meat",           ["tyson foods"]),
+    ("protein",        ["tyson foods", "danone"]),
+    ("seafood",        ["tyson foods"]),
+    ("poultry",        ["tyson foods"]),
+    ("dairy",          ["danone", "nestle"]),
+    ("infant",         ["danone", "nestle"]),
+    ("nutrition",      ["danone", "nestle"]),
+    ("beverage",       ["pepsico", "danone"]),
+    ("brewing",        ["nestle", "pepsico"]),
+    ("coffee",         ["nestle"]),
+    ("snack",          ["kraft heinz", "general mills", "pepsico"]),
+    ("confection",     ["nestle", "kraft heinz"]),
+    ("ingredient",     ["nestle", "danone"]),
+    ("agricultural",   ["nestle", "unilever"]),
+    ("food",           ["danone", "nestle", "kraft heinz", "general mills", "pepsico", "tyson foods", "unilever"]),
+    ("luxury",         ["lvmh", "estee lauder"]),
+    ("fashion",        ["lvmh"]),
+    ("beauty",         ["estee lauder", "lvmh"]),
+    ("consumer goods", ["unilever", "procter & gamble", "kraft heinz"]),
+    ("fmcg",           ["unilever", "procter & gamble"]),
+    ("cpg",            ["kraft heinz", "general mills"]),
+    ("semiconductor",  ["intel", "infineon", "keysight"]),
+    ("electronics",    ["infineon", "intel", "keysight"]),
+    ("software",       ["microsoft", "google", "ibm"]),
+    ("technology",     ["microsoft", "google", "apple", "ibm"]),
+    ("digital",        ["microsoft", "google", "grab"]),
+    ("automotive",     ["volkswagen", "proton"]),
+    ("aerospace",      ["rolls-royce"]),
+    ("industrial",     ["siemens", "bosch", "rolls-royce"]),
+    ("manufacturing",  ["siemens", "bosch", "infineon"]),
+    ("energy",         ["shell", "rwe"]),
+    ("oil",            ["shell", "petronas"]),
+    ("utilities",      ["rwe", "shell"]),
+    ("pharmaceutical", ["roche", "johnson & johnson"]),
+    ("medtech",        ["roche", "johnson & johnson"]),
+    ("healthcare",     ["roche", "johnson & johnson"]),
+    ("diagnostics",    ["roche"]),
+    ("telecoms",       ["ericsson", "maxis", "celcom"]),
+    ("telecom",        ["ericsson", "maxis", "celcom"]),
+    ("media",          ["astro", "netflix"]),
+    ("ict",            ["ericsson", "huawei", "maxis"]),
+    ("banking",        ["dbs", "maybank"]),
+    ("financial",      ["dbs", "maybank", "grab"]),
+    ("consulting",     ["ibm", "siemens"]),
+    ("professional",   ["ibm", "dbs"]),
+]
+
+
+def find_case_study_url(company_name: str) -> str | None:
+    """
+    Look up a company in KNOWN_CASE_STUDIES by normalised name.
+    Handles partial matches (e.g. 'Nestlé' matches 'nestle').
+    Returns URL or None.
+    """
+    key = company_name.lower().strip()
+    # Exact match
+    if key in KNOWN_CASE_STUDIES:
+        return KNOWN_CASE_STUDIES[key]
+    # Partial match — company name contains a known key or vice versa
+    for known_key, url in KNOWN_CASE_STUDIES.items():
+        if known_key in key or key in known_key:
+            return url
+    return None
+
+
+def find_related_case_studies(industry: str, archetype: str, exclude: str = "") -> list:
+    """
+    Find Pam's existing case studies closest to a new company.
+    Sub-sector keyword match first (JBS meat -> Tyson, not Danone).
+    Returns list of (company_name, url, reason) tuples, up to 3.
+    """
+    exclude_key  = exclude.lower().strip()
+    industry_low = industry.lower()
+    candidates   = []
+    seen         = set()
+
+    for keyword, names in INDUSTRY_CASE_STUDY_MAP_RANKED:
+        if keyword in industry_low:
+            for name in names:
+                if name == exclude_key or name in seen:
+                    continue
+                url = KNOWN_CASE_STUDIES.get(name)
+                if url:
+                    seen.add(name)
+                    candidates.append((name.title(), url, f"sub-sector: {keyword}"))
+            if len(candidates) >= 3:
+                break
+
+    archetype_examples = {
+        "1. Core Heavy":    ["tyson foods", "kraft heinz"],
+        "2. Edge Active":   ["siemens", "bosch", "ericsson"],
+        "3. Beyond Funded": ["danone", "roche", "shell"],
+        "4. Balanced":      ["nestle", "unilever", "microsoft"],
+        "5. Core + Edge":   ["volkswagen", "intel", "ibm"],
+        "6. Theater Risk":  ["general mills", "hp"],
+    }
+    for arch_key, names in archetype_examples.items():
+        if arch_key in archetype:
+            for name in names:
+                if name == exclude_key or name in seen:
+                    continue
+                url = KNOWN_CASE_STUDIES.get(name)
+                if url:
+                    seen.add(name)
+                    candidates.append((name.title(), url,
+                                       f"similar archetype ({display_archetype(archetype)})"))
+            break
+
+    return candidates[:3]
+
+"""
+Semi-Agentic Outreach System v3.9 — Case Study Registry + Perplexity Live People Search
+=====================================================
+CHANGES FROM v3.8:
+
+  [1] CASE STUDY REGISTRY — auto-discovered, silently applied
+      45 case studies at christinepamela.com are now a first-class asset.
+      On startup, the script loads a registry from learnings.json.
+      First run: auto-discovers all case studies from the website index.
+      During a run:
+        - Exact match → silently fetches and scores (no prompt)
+        - No match    → finds closest by industry + archetype
+                      → offers it as "related reference" for messaging
+                      → asks if you want to build a new case study
+      New command: python outreach_agent_v3_9.py --cases
+        → View, refresh, or manually add/remove case study URLs
+
+  [2] PEOPLE — Perplexity live search replaces DeepSeek for people
+      DeepSeek has no internet. It hallucinated "Bérangère Magarinos-Ruchat"
+      for Danone. Perplexity uses live web search.
+      New people priority chain:
+        1. Extract named people from YOUR OWN case study HTML (free, most accurate)
+        2. Verified cache in learnings.json (free, confirmed by you)
+        3. Perplexity sonar — live web search (~$0.01 per company, current names)
+        4. DeepSeek — NEVER used for people lookup anymore
+      Perplexity results show source URLs so you can verify before outreach.
+
+  [3] CASE STUDY OPPORTUNITY PROMPT — new research nudge
+      When no case study exists for a company:
+        → Shows closest existing case study and why it's relevant
+        → Asks: "Build a new case study for [Company]?" [y/later/n]
+        → If 'later': adds to a case_study_backlog in learnings.json
+        → If 'y': opens browser to your case studies page as a reminder
+
+INSTALL (first time only):
+  pip install anthropic pyyaml openai requests
+
+CONFIG (config.yaml):
+  anthropic_api_key: sk-ant-...
+  deepseek_api_key: sk-...
+  perplexity_api_key: pplx-...
+  deepseek_training_opt_out: true
+  weekly_budget: 2.00
+  user_name: Christine Pamela
+  user_short_name: Pam
+
+FOUR MODES:
+  python outreach_agent_v3_9.py           → Monday: audit + hunt + plan
+  python outreach_agent_v3_9.py --status  → Any day: quick check, no AI, no cost
+  python outreach_agent_v3_9.py --friday  → Friday: upload JSON, CEO review
+  python outreach_agent_v3_9.py --cases   → Manage case study registry
+"""
+
+import json
+import uuid
+import sys
+import os
+import re
+import hashlib
+import argparse
+import random
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+from collections import defaultdict
+
+try:
+    import anthropic
+except ImportError:
+    print("❌  Run: pip install anthropic")
+    sys.exit(1)
+
+try:
+    import yaml
+except ImportError:
+    print("❌  Run: pip install pyyaml")
+    sys.exit(1)
+
+try:
+    from openai import OpenAI as OpenAIClient
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+
+try:
+    import requests as _requests
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    REQUESTS_AVAILABLE = False
+
+# ─────────────────────────────────────────────────────────────
+# PATHS & CONFIG
+# ─────────────────────────────────────────────────────────────
+
+TRACKER_PATH   = "data/outreach_import.json"
+LEARNINGS_PATH = "data/learnings.json"
+CACHE_DIR      = Path("data/cache")
+OUTPUTS_DIR    = Path("outputs")
+
+EXPORT_PATH    = "outputs/new_contacts_for_import.json"
+FOLLOWUP_PATH  = "outputs/followup_actions.json"
+TASKS_PATH     = "outputs/tuesday_tasks.json"
+COST_PATH      = "outputs/cost_report.json"
+REVIEW_PATH    = "outputs/friday_review.txt"
+
+ALL_PLATFORMS = ["LinkedIn", "Email", "Twitter/X", "WhatsApp", "Substack", "Newsletter", "Conference", "Personal Intro"]
+
+ALL_INDUSTRIES = [
+    "Automotive", "Aerospace & Defence", "Banking & Financial Services",
+    "Chemicals", "Consumer Goods / FMCG", "Energy & Utilities",
+    "Food & Beverage", "Healthcare & MedTech", "Industrial / Manufacturing",
+    "Insurance", "Logistics & Supply Chain", "Luxury & Fashion",
+    "Mining & Metals", "Oil & Gas", "Pharmaceuticals & Life Sciences",
+    "Professional Services / Consulting", "Real Estate & Infrastructure",
+    "Retail", "Semiconductor & Electronics", "Technology / Software",
+    "Telecoms & Media", "Travel & Hospitality",
+]
+
+def load_config():
+    path = Path("config.yaml")
+    if not path.exists():
+        print("❌  config.yaml not found. Run from project root.")
+        sys.exit(1)
+    with open(path) as f:
+        cfg = yaml.safe_load(f)
+    if "YOUR-KEY-HERE" in cfg.get("anthropic_api_key", ""):
+        print("❌  Add your Anthropic API key to config.yaml")
+        sys.exit(1)
+    return cfg
+
+# ─────────────────────────────────────────────────────────────
+# MODEL CLIENTS
+# ─────────────────────────────────────────────────────────────
+
+def get_claude_client(config: dict):
+    """Claude — for message drafting, follow-ups, CEO review. Quality tasks."""
+    return anthropic.Anthropic(api_key=config["anthropic_api_key"])
+
+def get_deepseek_client(config: dict):
+    """
+    DeepSeek — for company hunting and Theta research ONLY. NOT for people.
+    Uses OpenAI-compatible API. Falls back to Claude if no key configured.
+    NOTE: DeepSeek API has NO live internet access. Never use for people lookup.
+    """
+    if not OPENAI_AVAILABLE:
+        print("  ⚠️  openai package not found. Run: pip install openai")
+        print("  ⚠️  Falling back to Claude for research (more expensive).")
+        return None
+
+    ds_key = config.get("deepseek_api_key", "")
+    if not ds_key or "YOUR" in ds_key or len(ds_key) < 10:
+        print("  ℹ️  No DeepSeek API key in config.yaml — using Claude for research.")
+        return None
+
+    extra_headers = {}
+    if config.get("deepseek_training_opt_out", False):
+        extra_headers["X-Training-Opt-Out"] = "true"
+
+    return OpenAIClient(
+        api_key=ds_key,
+        base_url="https://api.deepseek.com/v1",
+        default_headers=extra_headers if extra_headers else None,
+    )
+
+
+def get_perplexity_key(config: dict) -> str | None:
+    """
+    Perplexity Sonar — ONLY used for people lookup. Has live internet access.
+    Returns the API key string, or None if not configured.
+    Cost: ~$0.01 per people lookup (sonar model).
+    """
+    key = config.get("perplexity_api_key", "")
+    if not key or len(key) < 20:
+        return None
+    # Reject obvious placeholders
+    if key in ("pplx-xx", "pplx-...", "YOUR-KEY-HERE"):
+        return None
+    if not REQUESTS_AVAILABLE:
+        print("  ⚠️  requests package not found. Run: python -m pip install requests")
+        return None
+    return key
+
+
+def call_perplexity(api_key: str, prompt: str, system: str = "") -> tuple:
+    """
+    Call Perplexity sonar model with live web search.
+    Returns (text, citations_list). Raises on failure.
+    """
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
+    payload = {
+        "model": "sonar",
+        "messages": messages,
+        "max_tokens": 1500,
+        "temperature": 0.1,
+        "search_recency_filter": "month",
+    }
+    resp = _requests.post(
+        "https://api.perplexity.ai/chat/completions",
+        headers=headers,
+        json=payload,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    text      = data["choices"][0]["message"]["content"].strip()
+    citations = data.get("citations", [])
+    return text, citations
+
+def call_deepseek(ds_client, prompt: str, max_tokens: int = 4000) -> str:
+    """Call DeepSeek with OpenAI-compatible interface."""
+    response = ds_client.chat.completions.create(
+        model="deepseek-chat",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=max_tokens,
+        temperature=0.1,
+    )
+    return response.choices[0].message.content.strip()
+
+def call_claude(claude_client, prompt: str, max_tokens: int = 800) -> str:
+    """Call Claude for high-quality reasoning tasks."""
+    r = claude_client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=max_tokens,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return r.content[0].text.strip()
+
+# ─────────────────────────────────────────────────────────────
+# TRACKER JSON LOADER
+# ─────────────────────────────────────────────────────────────
+
+def load_tracker_json(path: str) -> dict:
+    p = Path(path)
+    if not p.exists():
+        print(f"❌  File not found: {path}")
+        sys.exit(1)
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        print(f"❌  JSON parse error in {path}: {e}")
+        sys.exit(1)
+    if isinstance(raw, list):
+        return {"contacts": raw, "learnings": [], "weeklyGoals": {}, "monthlyGoals": {}}
+    contacts = raw.get("contacts", [])
+    return {
+        "contacts":            contacts,
+        "learnings":           raw.get("learnings", []),
+        "weeklyGoals":         raw.get("weeklyGoals", {}),
+        "weeklyGoalsHistory":  raw.get("weeklyGoalsHistory", []),
+        "monthlyGoals":        raw.get("monthlyGoals", {}),
+        "monthlyGoalsHistory": raw.get("monthlyGoalsHistory", []),
+        "templates":           raw.get("templates", []),
+        "exportDate":          raw.get("exportDate", ""),
+        "version":             raw.get("version", ""),
+        "source_file":         path,
+    }
+
+# ─────────────────────────────────────────────────────────────
+# DISPLAY HELPERS
+# ─────────────────────────────────────────────────────────────
+
+def hr(char="─", n=62): print(char * n)
+def banner(t): print(); hr("═"); print(f"  {t}"); hr("═")
+def section(t): print(); hr(); print(f"  {t}"); hr()
+
+def ask(prompt, options=None):
+    if options:
+        opts = " / ".join(f"[{o}]" for o in options)
+        prompt = f"{prompt}  {opts}: "
+    while True:
+        r = input(prompt).strip().lower()
+        if options is None or r in [o.lower() for o in options]:
+            return r
+        print(f"  Please enter: {', '.join(options)}")
+
+def day_greeting() -> str:
+    day = datetime.now().strftime("%A")
+    greetings = {
+        "Monday":    "🗓️  Monday — Strategy & Planning day.",
+        "Tuesday":   "📨  Tuesday — Outreach execution day. Let's check what's queued.",
+        "Wednesday": "✍️   Wednesday — Writing & case study day.",
+        "Thursday":  "💬  Thursday — Conversations & follow-up day.",
+        "Friday":    "🪞  Friday — Reflection day. Run --friday to review your week.",
+        "Saturday":  "🌿  Saturday — Rest. The agent can wait until Monday.",
+        "Sunday":    "🌿  Sunday — Rest. The agent can wait until Monday.",
+    }
+    return greetings.get(day, f"📅  {day}")
+
+# ─────────────────────────────────────────────────────────────
+# COST TRACKER
+# ─────────────────────────────────────────────────────────────
+
+class CostTracker:
+    COSTS = {
+        "hunt":                  0.02,
+        "research":              0.01,
+        "research_batch":        0.03,
+        "cached_research":       0.01,
+        "cached_people":         0.00,
+        "verified_people":       0.00,   # v3.8: verified cache is always free
+        "draft":                 0.05,
+        "followup_draft":        0.03,
+        "theta":                 0.00,
+        "channels":              0.02,
+        "analysis":              0.08,
+        "reflection":            0.10,
+        "ceo_review":            0.15,
+    }
+
+    def __init__(self, budget: float):
+        self.budget = budget
+        self.spent  = 0.0
+        self.log    = []
+
+    def charge(self, op: str, note: str = "") -> float:
+        cost = self.COSTS.get(op, 0.0)
+        self.spent += cost
+        self.log.append({"op": op, "cost": cost, "note": note,
+                         "ts": datetime.now().isoformat()})
+        return cost
+
+    def remaining(self) -> float:
+        return max(0.0, self.budget - self.spent)
+
+    def can_afford(self, op: str) -> bool:
+        return (self.spent + self.COSTS.get(op, 0)) <= self.budget
+
+    def summary(self) -> str:
+        pct = min(100, int((self.spent / self.budget) * 100))
+        bar = "█" * (pct // 5) + "░" * (20 - pct // 5)
+        return f"[{bar}] ${self.spent:.2f} / ${self.budget:.2f} ({pct}%)"
+
+    def projection(self, remaining_companies: int) -> str:
+        per_company = self.COSTS["cached_research"] + self.COSTS["theta"] + self.COSTS["channels"] + self.COSTS["draft"]
+        projected   = per_company * remaining_companies
+        return (
+            f"\n  💰 Current: ${self.spent:.2f} | Remaining: ${self.remaining():.2f}"
+            f"\n  📊 Projected for {remaining_companies} companies: ~${projected:.2f} total"
+            + (f"\n  ⚠️  May exceed budget by ${projected - self.remaining():.2f}" if projected > self.remaining() else "")
+        )
+
+    def save(self):
+        OUTPUTS_DIR.mkdir(exist_ok=True)
+        with open(COST_PATH, "w") as f:
+            json.dump({
+                "week_of":     datetime.now().strftime("%Y-%m-%d"),
+                "total_spent": round(self.spent, 4),
+                "budget":      self.budget,
+                "remaining":   round(self.remaining(), 4),
+                "operations":  self.log,
+            }, f, indent=2)
+
+# ─────────────────────────────────────────────────────────────
+# RESEARCH CACHE
+# ─────────────────────────────────────────────────────────────
+
+CACHE_TTL = {"background": 90, "news": 7, "people": 30}
+
+def cache_key(company: str) -> str:
+    safe = re.sub(r"[^a-z0-9]", "_", company.lower().strip())
+    return safe[:40] or hashlib.md5(company.encode()).hexdigest()[:8]
+
+def load_cache(company: str) -> dict:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    path = CACHE_DIR / f"{cache_key(company)}.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+        now  = datetime.now()
+        out  = {}
+        for field, ttl in CACHE_TTL.items():
+            if field in data:
+                cached_at = datetime.fromisoformat(data.get(f"{field}_at", "2000-01-01"))
+                if (now - cached_at).days < ttl:
+                    out[field] = data[field]
+        return out
+    except Exception:
+        return {}
+
+def save_cache(company: str, fields: dict):
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    path = CACHE_DIR / f"{cache_key(company)}.json"
+    data = {}
+    if path.exists():
+        try: data = json.loads(path.read_text())
+        except: pass
+    now = datetime.now().isoformat()
+    for k, v in fields.items():
+        data[k] = v
+        data[f"{k}_at"] = now
+    path.write_text(json.dumps(data, indent=2))
+
+def load_cached_people(company: str) -> list:
+    cached = load_cache(company)
+    return cached.get("people", [])
+
+def save_cached_people(company: str, people: list):
+    save_cache(company, {"people": people})
+
+# ─────────────────────────────────────────────────────────────
+# [v3.8 FIX 2 — PART A] VERIFIED PEOPLE CACHE
+# ─────────────────────────────────────────────────────────────
+
+def get_verified_people(company_name: str, learnings: dict, max_age_days: int = 90) -> dict | None:
+    """
+    Check learnings.json for verified people before calling API.
+    Returns the full entry dict (with people list, source, date) or None if
+    not found / stale.
+    """
+    vp    = learnings.get("verified_people", {})
+    entry = vp.get(company_name)
+    if not entry:
+        return None
+    try:
+        verified_date = datetime.strptime(entry["verified_date"], "%Y-%m-%d")
+    except Exception:
+        return None
+    age = (datetime.now() - verified_date).days
+    if age > max_age_days:
+        print(f"  ℹ️  Verified people for {company_name} are {age} days old (max {max_age_days}) — will re-look up.")
+        return None
+    return entry
+
+
+def save_verified_people(company_name: str, people: list, source: str, learnings: dict):
+    """Write people to learnings.json verified_people cache."""
+    if "verified_people" not in learnings:
+        learnings["verified_people"] = {}
+    learnings["verified_people"][company_name] = {
+        "verified_date": datetime.now().strftime("%Y-%m-%d"),
+        "source":        source,
+        "people":        people,
+    }
+    save_learnings(learnings)
+    print(f"  ✓ Saved to verified cache (learnings.json → verified_people → {company_name})")
+
+
+def prompt_manual_person_entry() -> dict | None:
+    """
+    Ask Pam to enter a person manually (names she found herself on LinkedIn etc).
+    Returns a dict in the same shape as API-returned people, or None if aborted.
+    """
+    print("\n  ── MANUAL PERSON ENTRY ──")
+    name = input("  Name: ").strip()
+    if not name:
+        print("  Aborted.")
+        return None
+    title  = input("  Title: ").strip()
+    why    = input("  Why (one line — what they own that's relevant): ").strip()
+    source = input("  Source (e.g. 'LinkedIn', 'company website', 'danone.com/governance'): ").strip()
+    linkedin_hint = input("  LinkedIn hint / search string (optional, Enter to skip): ").strip()
+    return {
+        "name":           name,
+        "title":          title,
+        "why":            why,
+        "linkedin_hint":  linkedin_hint,
+        "_manual_source": source,
+        "confidence":     "Verified",
+    }
+
+
+def display_verified_people_banner(entry: dict):
+    """Show the VERIFIED banner when people come from the verified cache."""
+    age  = (datetime.now() - datetime.strptime(entry["verified_date"], "%Y-%m-%d")).days
+    src  = entry.get("source", "unknown source")
+    date = entry["verified_date"]
+    print(f"\n  ✅  VERIFIED — sourced from [{src}] on {date} ({age} days ago)")
+
+
+def display_api_confidence_warning():
+    """Show the LOW CONFIDENCE warning when people come from the DeepSeek API."""
+    print()
+    print("  ┌─────────────────────────────────────────────────────────────┐")
+    print("  │ ⚠️  CONFIDENCE: LOW — DeepSeek API has no live internet     │")
+    print("  │    access. These names come from training data and may be   │")
+    print("  │    outdated or completely wrong.                            │")
+    print("  │    → Verify each name on LinkedIn before reaching out.      │")
+    print("  │    → Use [m] to enter verified names and save for next time.│")
+    print("  └─────────────────────────────────────────────────────────────┘")
+
+# ─────────────────────────────────────────────────────────────
+# ARCHETYPE SYSTEM
+# ─────────────────────────────────────────────────────────────
+
+VALID_ARCHETYPES = [
+    "1. Core Heavy",
+    "2. Edge Active",
+    "3. Beyond Funded",
+    "4. Balanced",
+    "5. Core + Edge",
+    "6. Theater Risk",
+]
+
+def display_archetype(arch: str) -> str:
+    if arch and '.' in arch:
+        return arch.split('.', 1)[1].strip()
+    return arch
+
+def determine_archetype(core: int, edge: int, beyond: int, theater: int) -> str:
+    if theater >= 3:
+        return "6. Theater Risk"
+    if core >= 7 and edge < 3 and beyond < 2:
+        return "1. Core Heavy"
+    if beyond >= 4:
+        return "3. Beyond Funded"
+    if core >= 5 and edge >= 5 and beyond < 2:
+        return "5. Core + Edge"
+    if edge >= 5 and core >= 4 and beyond < 3:
+        return "2. Edge Active"
+    if 4 <= core <= 7 and 4 <= edge <= 7 and 2 <= beyond <= 4:
+        return "4. Balanced"
+    return "4. Balanced"
+
+def get_focus_area(archetype: str) -> str:
+    if "Core Heavy"    in archetype: return "protecting the core and building what comes next"
+    if "Edge Active"   in archetype: return "scaling Edge bets without destabilizing the core"
+    if "Beyond Funded" in archetype: return "bridging long-term research to commercial reality"
+    if "Balanced"      in archetype: return "balancing today's performance with tomorrow's growth"
+    if "Core + Edge"   in archetype: return "building the next curve while setting up long-term bets"
+    if "Theater Risk"  in archetype: return "moving from pilots and showcases to scalable impact"
+    return "managing the tension between today's core and tomorrow's bets"
+
+def display_theta_visual(company_name: str, theta: dict):
+    zones = theta['zone_distribution']
+    core_bar   = "🟩" * zones['core']   + "⬜" * (10 - zones['core'])
+    edge_bar   = "🟨" * zones['edge']   + "⬜" * (10 - zones['edge'])
+    beyond_bar = "🟥" * zones['beyond'] + "⬜" * (10 - zones['beyond'])
+    print(f"\n  Zones:")
+    print(f"    Core   {core_bar}  {zones['core']}/10")
+    print(f"    Edge   {edge_bar}  {zones['edge']}/10")
+    print(f"    Beyond {beyond_bar}  {zones['beyond']}/10")
+    print(f"\n  Pattern:  {display_archetype(theta.get('archetype',''))}")
+    print(f"  Pain:     {theta.get('pain_point','')}")
+    print(f"  Angle:    {theta.get('messaging_angle','')}")
+    if theta.get('theater_risk', 0) >= 2:
+        print(f"  ⚠️  Theater risk score: {theta['theater_risk']}/10")
+    # [v3.8] Show which scoring source was used
+    if theta.get("case_study_source") == "case_study_html":
+        pcts = theta.get("revenue_pcts_found", {})
+        core_pct   = f"{pcts.get('core','?')}%" if pcts.get('core') is not None else "?"
+        edge_pct   = f"{pcts.get('edge','?')}%" if pcts.get('edge') is not None else "?"
+        beyond_pct = f"{pcts.get('beyond','?')}%" if pcts.get('beyond') is not None else "?"
+        print(f"  📎  Scores sourced directly from your case study "
+              f"(Core: {core_pct}, Edge: {edge_pct}, Beyond: {beyond_pct})")
+    elif theta.get("case_study_informed"):
+        print(f"  📎  Scores informed by your case study")
+    if theta.get("score_method") and theta.get("case_study_source") != "case_study_html":
+        print(f"  📊  Scoring method: {theta['score_method']}")
+
+# ─────────────────────────────────────────────────────────────
+# LEARNING ENGINE
+# ─────────────────────────────────────────────────────────────
+
+ANGLE_KEYWORDS = {
+    "case_study":           ["case study", "example", "dbs", "siemens", "telco", "intel"],
+    "portfolio_governance": ["portfolio", "governance", "portfolio governance"],
+    "research_observation": ["i noticed", "i've been studying", "i've been following", "i look at"],
+    "pain_point_question":  ["how are you thinking", "how do you", "curious how", "what's your approach"],
+    "market_insight":       ["market", "trend", "shift", "disruption", "s-curve"],
+    "technical_depth":      ["digital twin", "xcelerator", "ecosystem", "platform", "architecture"],
+    "peer_acknowledgment":  ["spot on", "you're right", "great point", "i agree", "resonates"],
+    "article_share":        ["i wrote", "i published", "article", "medium", "substack"],
 }
+
+def classify_seniority(title: str) -> str:
+    t = title.lower()
+    if any(x in t for x in ["cto","chief technology","chief digital","vp engineering"]):
+        return "cto"
+    if any(x in t for x in ["ceo","chief executive","president","managing director"," md "]):
+        return "ceo"
+    if any(x in t for x in ["cso","chief strategy","chief innovation","chief transformation"]):
+        return "cso"
+    if any(x in t for x in ["partner","principal","director","vp","vice president"]):
+        return "vp_director"
+    if any(x in t for x in ["innovation","r&d","research","transformation","strategy"]):
+        return "innovation_lead"
+    return "other"
+
+def analyze_patterns(contacts: list) -> dict:
+    channel_stats    = defaultdict(lambda: {"sent":0,"responded":0,"positive":0})
+    engagement_stats = defaultdict(lambda: {"count":0,"responses":0})
+    angle_wins       = defaultdict(int)
+    angle_attempts   = defaultdict(int)
+    seniority_stats  = defaultdict(lambda: {"sent":0,"responded":0,"positive":0,"angles":[]})
+    industry_stats   = defaultdict(lambda: {"sent":0,"responded":0})
+    timing           = []
+
+    for c in contacts:
+        logs      = c.get("communicationLog", [])
+        title     = c.get("jobTitle", "")
+        seniority = classify_seniority(title)
+        industry  = c.get("industryFocus", "Other")
+
+        for log in logs:
+            ch        = log.get("channel", "LinkedIn")
+            eng_type  = log.get("engagementType", "")
+            response  = (log.get("response","") or "").strip()
+            sentiment = log.get("sentiment","")
+            msg       = (log.get("message","") or "").lower()
+            date_str  = log.get("date","")
+            responded = bool(response) and response.lower() not in ["no response","none"]
+            positive  = sentiment in ("Positive","Very positive")
+
+            channel_stats[ch]["sent"] += 1
+            if responded: channel_stats[ch]["responded"] += 1
+            if positive:  channel_stats[ch]["positive"]  += 1
+
+            if eng_type:
+                engagement_stats[eng_type]["count"] += 1
+                if responded: engagement_stats[eng_type]["responses"] += 1
+
+            seniority_stats[seniority]["sent"] += 1
+            if responded: seniority_stats[seniority]["responded"] += 1
+            if positive:  seniority_stats[seniority]["positive"]  += 1
+
+            industry_stats[industry]["sent"] += 1
+            if responded: industry_stats[industry]["responded"] += 1
+
+            for angle, kws in ANGLE_KEYWORDS.items():
+                if any(kw in msg for kw in kws):
+                    angle_attempts[angle] += 1
+                    if responded:
+                        angle_wins[angle] += 1
+                        if angle not in seniority_stats[seniority]["angles"]:
+                            seniority_stats[seniority]["angles"].append(angle)
+
+            if date_str and responded:
+                try:
+                    dt = datetime.fromisoformat(date_str.replace("Z","+00:00"))
+                    timing.append({"day": dt.strftime("%A"), "hour": dt.hour, "channel": ch})
+                except: pass
+
+    channel_rates = {}
+    for ch, s in channel_stats.items():
+        rate = (s["responded"] / s["sent"] * 100) if s["sent"] else 0
+        channel_rates[ch] = {**s, "rate_pct": round(rate,1)}
+
+    angle_rates = {}
+    for angle in set(list(angle_wins.keys()) + list(angle_attempts.keys())):
+        attempts = angle_attempts.get(angle, 0)
+        wins     = angle_wins.get(angle, 0)
+        rate     = (wins / attempts * 100) if attempts else 0
+        angle_rates[angle] = {"attempts": attempts, "wins": wins, "rate_pct": round(rate,1)}
+
+    seniority_rates = {}
+    for level, s in seniority_stats.items():
+        rate = (s["responded"] / s["sent"] * 100) if s["sent"] else 0
+        seniority_rates[level] = {**s, "rate_pct": round(rate,1)}
+
+    industry_rates = {}
+    for ind, s in industry_stats.items():
+        rate = (s["responded"] / s["sent"] * 100) if s["sent"] else 0
+        industry_rates[ind] = {**s, "rate_pct": round(rate,1)}
+
+    day_counts  = defaultdict(int)
+    hour_counts = defaultdict(int)
+    for t in timing:
+        day_counts[t["day"]] += 1
+        hour_counts[t["hour"] // 3 * 3] += 1
+    best_day  = max(day_counts,  key=day_counts.get)  if day_counts  else "Tuesday"
+    best_hour = max(hour_counts, key=hour_counts.get) if hour_counts else 9
+
+    top_channel  = max(channel_rates,  key=lambda k: channel_rates[k]["rate_pct"],  default="Email")
+    top_angle    = max(angle_rates,    key=lambda k: angle_rates[k]["rate_pct"],    default="research_observation")
+    top_industry = max(industry_rates, key=lambda k: industry_rates[k]["rate_pct"], default="")
+
+    return {
+        "analyzed_at":      datetime.now().isoformat(),
+        "channel_rates":    channel_rates,
+        "angle_rates":      angle_rates,
+        "seniority_rates":  seniority_rates,
+        "industry_rates":   industry_rates,
+        "engagement_stats": {k: {**v, "rate_pct": round(v["responses"]/v["count"]*100,1) if v["count"] else 0}
+                             for k, v in engagement_stats.items()},
+        "top_channel":      top_channel,
+        "top_angle":        top_angle,
+        "top_industry":     top_industry,
+        "best_day":         best_day,
+        "best_hour":        best_hour,
+        "best_send_window": f"{best_day} {best_hour:02d}:00–{best_hour+3:02d}:00",
+    }
+
+def load_learnings() -> dict:
+    path = Path(LEARNINGS_PATH)
+    if path.exists():
+        try: return json.loads(path.read_text())
+        except: pass
+    return {
+        "history":               [],
+        "patterns":              {},
+        "strategy_notes":        [],
+        "archetype_corrections": {},
+        "industry_performance":  {},
+        "last_tracker_file":     "",
+        "verified_people":       {},
+        "case_study_registry":   {},   # [v3.9] company_name → {url, industry, archetype, fetched_at}
+        "case_study_backlog":    [],   # [v3.9] companies where Pam wants to build a case study
+    }
+
+# ─────────────────────────────────────────────────────────────
+# [v3.9] CASE STUDY REGISTRY
+# ─────────────────────────────────────────────────────────────
+
+# Full map of known case studies from christinepamela.com/case-studies.html
+# Key = normalised company name, value = URL slug
+KNOWN_CASE_STUDIES = {
+    "apple":           "https://christinepamela.com/apple-case-study.html",
+    "astro":           "https://christinepamela.com/astro-case-study.html",
+    "berjaya":         "https://christinepamela.com/berjaya-case-study.html",
+    "bosch":           "https://christinepamela.com/bosch-case-study.html",
+    "block":           "https://christinepamela.com/block-case-study.html",
+    "canva":           "https://christinepamela.com/canva-case-study.html",
+    "celcom":          "https://christinepamela.com/celcom-case-study.html",
+    "danone":          "https://christinepamela.com/danone-case-study.html",
+    "dbs":             "https://christinepamela.com/dbs-case-study.html",
+    "estee lauder":    "https://christinepamela.com/esteelauder-case-study.html",
+    "ericsson":        "https://christinepamela.com/ericsson-case-study.html",
+    "general mills":   "https://christinepamela.com/generalmills-case-study.html",
+    "google":          "https://christinepamela.com/google-case-study.html",
+    "grab":            "https://christinepamela.com/grab-case-study.html",
+    "huawei":          "https://christinepamela.com/huawei-case-study.html",
+    "hp":              "https://christinepamela.com/hp-case-study.html",
+    "ibm":             "https://christinepamela.com/ibm-case-study.html",
+    "infineon":        "https://christinepamela.com/infineon-case-study.html",
+    "intel":           "https://christinepamela.com/intel-case-study.html",
+    "johnson & johnson": "https://christinepamela.com/jj-case-study.html",
+    "j&j":             "https://christinepamela.com/jj-case-study.html",
+    "keysight":        "https://christinepamela.com/keysight-case-study.html",
+    "kraft heinz":     "https://christinepamela.com/kraftheinz-case-study.html",
+    "lego":            "https://christinepamela.com/lego-case-study.html",
+    "lvmh":            "https://christinepamela.com/lvmh-case-study.html",
+    "maxis":           "https://christinepamela.com/maxis-case-study.html",
+    "maybank":         "https://christinepamela.com/maybank-case-study.html",
+    "microsoft":       "https://christinepamela.com/microsoft-case-study.html",
+    "nestle":          "https://christinepamela.com/nestle-case-study.html",
+    "nestlé":          "https://christinepamela.com/nestle-case-study.html",
+    "netflix":         "https://christinepamela.com/netflix-case-study.html",
+    "pepsico":         "https://christinepamela.com/pepsico-case-study.html",
+    "pepsi":           "https://christinepamela.com/pepsico-case-study.html",
+    "petronas":        "https://christinepamela.com/petronas-case-study.html",
+    "procter & gamble": "https://christinepamela.com/pg-case-study.html",
+    "p&g":             "https://christinepamela.com/pg-case-study.html",
+    "proton":          "https://christinepamela.com/proton-case-study.html",
+    "roche":           "https://christinepamela.com/roche-case-study.html",
+    "rolls-royce":     "https://christinepamela.com/rolls-royce-case-study.html",
+    "rwe":             "https://christinepamela.com/rwe-case-study.html",
+    "rwe ag":          "https://christinepamela.com/rwe-case-study.html",
+    "shell":           "https://christinepamela.com/shell-case-study.html",
+    "siemens":         "https://christinepamela.com/siemens-case-study.html",
+    "spacex":          "https://christinepamela.com/spacex-case-study.html",
+    "tesla":           "https://christinepamela.com/tesla-case-study.html",
+    "tyson foods":     "https://christinepamela.com/tysonfoods-case-study.html",
+    "tyson":           "https://christinepamela.com/tysonfoods-case-study.html",
+    "unilever":        "https://christinepamela.com/unilever-case-study.html",
+    "volkswagen":      "https://christinepamela.com/vw-case-study.html",
+    "vw":              "https://christinepamela.com/vw-case-study.html",
+    "wework":          "https://christinepamela.com/wework-case-study.html",
+    "we work":         "https://christinepamela.com/wework-case-study.html",
+}
+
+# Industry → which case studies are best references
+# Sub-sector aware industry -> case study mapping (specific before generic)
 
 
 def find_case_study_url(company_name: str) -> str | None:
@@ -2209,6 +3078,59 @@ def extract_people_from_case_study_html(html: str, company_name: str) -> list:
     return people[:5]
 
 
+def parse_perplexity_people_response(text: str, company_name: str) -> list:
+    """
+    Parse Perplexity sonar responses which tend to be prose, not structured blocks.
+    Handles both structured ---PERSON--- format AND conversational prose.
+    """
+    # Try structured parser first
+    people = parse_people_response(text)
+    if people:
+        return people
+
+    # Prose fallback — Perplexity often writes "1. **Name** - Title\n   Why..."
+    people = []
+    seen   = set()
+
+    # Pattern: numbered entries with bold names
+    # "1. **Gilberto Tomazoni** - Global CEO\n"
+    # "1. Gilberto Tomazoni, Global CEO"
+    patterns = [
+        re.compile(r'\d+\.\s+\*{0,2}([A-Z][a-z]+(?:\s+[A-Z][a-z]*\.?\s*)*[A-Z][a-z]+)\*{0,2}\s*[-–,]\s*([^\n]{10,80})', re.MULTILINE),
+        re.compile(r'\*{1,2}([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,4})\*{1,2}\s*[-–,]\s*([^\n]{10,80})', re.MULTILINE),
+    ]
+
+    for pattern in patterns:
+        for m in pattern.finditer(text):
+            name  = m.group(1).strip()
+            title = m.group(2).strip().rstrip('.,')
+
+            # Must look like a real title
+            if not any(kw in title.lower() for kw in [
+                'chief', 'head', 'president', 'director', 'officer', 'vp',
+                'vice', 'ceo', 'cto', 'cso', 'coo', 'executive', 'senior',
+                'lead', 'global', 'managing', 'general', 'founder'
+            ]):
+                continue
+            if len(name.split()) < 2 or len(name.split()) > 5:
+                continue
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            people.append({
+                "rank":             str(len(people) + 1),
+                "name":             name,
+                "title":            title,
+                "why":              f"Found via Perplexity live search for {company_name}",
+                "linkedin_search":  f'"{name}" "{company_name}"',
+                "confidence":       "Medium",
+                "_from_perplexity": True,
+            })
+
+    return people[:5]
+
+
 def find_people_via_perplexity(api_key: str, company_name: str, industry: str,
                                 research_bg: str, cost: CostTracker) -> tuple:
     """
@@ -2216,46 +3138,40 @@ def find_people_via_perplexity(api_key: str, company_name: str, industry: str,
     Returns (people_list, citations_list).
     """
     system = (
-        "You are a business intelligence researcher. "
-        "Search the web for current leadership at the specified company. "
-        "Return only real, verifiable people with their actual current titles. "
-        "Do not invent names. If you cannot find someone, say so."
+        "You are a business intelligence researcher with access to current web data. "
+        "Find real, current senior executives at the specified company. "
+        "Be specific with names and titles. Search LinkedIn and company websites."
     )
 
-    prompt = f"""Find the current senior leaders who own innovation strategy at {company_name} ({industry}).
+    # Prompt written for Perplexity's prose style — don't force structured format
+    prompt = f"""Who are the current senior executives at {company_name} who own innovation, strategy, R&D, or digital transformation?
 
-I need people in these roles (in priority order):
-1. Chief Innovation Officer or equivalent
-2. Chief Strategy Officer
-3. Chief Technology Officer / Chief Digital Officer
-4. Head of R&D / Head of New Ventures
-5. CEO (if they personally drive innovation agenda)
+Search for people in these roles at {company_name}:
+- Chief Innovation Officer or Chief Technology Officer
+- Chief Strategy Officer or Head of Strategy
+- Head of R&D or New Ventures
+- Chief Digital Officer or VP Digital Transformation
+- CEO if they personally drive innovation
 
-For each person found, provide:
-- Full name (verified from company website or LinkedIn)
-- Exact current title
-- Why they are relevant to innovation portfolio decisions
-- LinkedIn search string to find them
+For each person, give me:
+1. Their full name
+2. Their exact current title
+3. One sentence on why they matter for innovation decisions
 
-Context about {company_name}'s innovation profile:
-{research_bg[:600]}
-
-Format EXACTLY:
----PERSON---
-RANK: 1
-NAME: [Full name]
-TITLE: [Current title]
-WHY: [One sentence on what they own]
-LINKEDIN_SEARCH: [Search string]
-SOURCE: [Where you found this — e.g. company website, LinkedIn]
-
-Repeat for each person. Maximum 5 people. Only include people you can verify exist."""
+List them numbered 1 to 5. Only include people you can confirm exist at {company_name} right now."""
 
     try:
         text, citations = call_perplexity(api_key, prompt, system=system)
-        people          = parse_people_response(text)
 
-        # Add source citations to each person
+        # Use prose-aware parser
+        people = parse_perplexity_people_response(text, company_name)
+
+        if not people:
+            # Last resort: show what Perplexity returned so we can debug
+            print(f"  ⚠️  Perplexity returned response but parser found 0 people.")
+            print(f"  Raw preview: {text[:200]}")
+
+        # Add citations to each person
         if citations and people:
             for p in people:
                 p["_sources"] = citations[:3]
@@ -2263,7 +3179,7 @@ Repeat for each person. Maximum 5 people. Only include people you can verify exi
         cost.charge("research", note=f"{company_name} people (Perplexity live)")
         return people, citations
     except Exception as e:
-        print(f"  ⚠️  Perplexity people lookup failed: {e}")
+        print(f"  ⚠️  Perplexity call failed: {e}")
         return [], []
 
 
@@ -2324,7 +3240,7 @@ def find_target_people(ds_client, claude_client, company: dict, research_bg: str
             return people[:5], "perplexity", None
 
     # ── TIER 5: DeepSeek/Claude fallback (last resort) ────────
-    print(f"  ⚠️  Perplexity unavailable — falling back to DeepSeek (LOW CONFIDENCE)")
+    print(f"  ⚠️  Could not parse Perplexity response — falling back to DeepSeek (LOW CONFIDENCE)")
     industry   = company.get("industry", "")
     model_name = "DeepSeek" if ds_client else "Claude"
 
